@@ -4,6 +4,8 @@ Prediction markets are becoming the world's truth machines—but who audits the 
 🦀 Electric Crab – The Market Guardian 预测市场风险审计和透明度智能体
 Electric Crab 是一个面向 Polymarket 的多智能体市场风险守护者。它不是告诉用户“买什么”，而是帮助用户看清一个预测市场背后的概率偏差、流动性风险、巨鲸风险、Agent 分歧和信息透明度。
 
+![Electric Crab](EC.png)
+
 1. 项目背景
 
 预测市场越来越重要，Polymarket 这类平台把公众事件、政治事件、体育赛事、加密市场都变成了可交易概率。
