@@ -1,8 +1,10 @@
-fastapi
-uvicorn
 numpy
-pandas
 scikit-learn
-pydantic
 httpx
 torch
+fastapi
+uvicorn
+pydantic
+streamlit 
+pandas
+requests

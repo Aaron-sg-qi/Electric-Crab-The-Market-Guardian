@@ -1,0 +1,14 @@
+# Python virtual environment
+venv/
+ENV/
+env/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Optional: Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Optional: system files
+.DS_Store
