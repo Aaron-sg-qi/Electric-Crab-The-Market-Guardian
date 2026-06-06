@@ -3,9 +3,9 @@ Electric Crab – The Market Guardian
 
 Multi-Agent AI Prediction Market System
 
-Features:
+Core features:
 - Simulated prediction market audit
-- Real Polymarket Gamma API support
+- Real Polymarket Gamma API support through extensions
 - Multi-agent probability estimation
 - Classical ML probability model
 - Deep learning probability model through extensions
@@ -13,7 +13,10 @@ Features:
 - GPU / CPU batch scoring through extensions
 - xapi.to gateway task generation
 - @Mention All audit notification task
-- xAPI / xapi.to showcase output
+- YES / NO prediction output
+- Prediction proof hashing
+- Data quality labeling
+- Settlement feedback hook for RL improvement
 
 Command examples:
     python electric_crab_core.py
@@ -28,7 +31,9 @@ import os
 import json
 import random
 import asyncio
+import hashlib
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 
 import numpy as np
@@ -40,7 +45,7 @@ from sklearn.ensemble import RandomForestRegressor
 # =========================================================
 
 # Do NOT hardcode real API keys in code submitted to GitHub.
-# Set it in PowerShell:
+# PowerShell example:
 # $env:XAPI_API_KEY="your_key_here"
 # $env:XAPI_ENABLE_CLI="true"
 
@@ -61,6 +66,17 @@ class MarketEvent:
     liquidity_score: float
     volatility: float
     sentiment_score: float
+    data_quality: Optional[Dict[str, str]] = None
+
+
+@dataclass
+class PredictionProof:
+    event_id: str
+    prediction_hash: str
+    created_at: str
+    proof_payload: Dict[str, Any]
+    chain_status: str
+    chain_tx_hash: Optional[str]
 
 
 @dataclass
@@ -69,11 +85,14 @@ class AuditResult:
     title: str
     market_probability: float
     model_probability: float
+    predicted_outcome: str
+    outcome_confidence: float
     deviation: float
     risk_level: str
     trust_score: float
     main_factors: List[str]
     tldr: str
+    proof: PredictionProof
     xapi: Dict[str, Any]
 
 
@@ -138,6 +157,7 @@ class FallbackXAPIGatewayClient:
             "mention": "@Mention All",
             "xapi_prompt": xapi_prompt,
             "message": f"@Mention All\n\n{summary}",
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "source": "Electric Crab – The Market Guardian",
         }
 
@@ -151,6 +171,8 @@ class FallbackXAPIGatewayClient:
                 "/xapi\n"
                 f"搜索这个预测市场相关的最新公开信息，并总结可能影响概率的关键因素：{market_title}"
             ),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source": "Electric Crab – The Market Guardian",
         }
 
     def build_twitter_signal_task(self, query: str) -> Dict[str, Any]:
@@ -163,9 +185,13 @@ class FallbackXAPIGatewayClient:
                 "/xapi\n"
                 f"搜索 Twitter/X 上关于「{query}」的最新讨论，提取情绪、热度和关键观点。"
             ),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source": "Electric Crab – The Market Guardian",
         }
 
     def build_crypto_price_task(self, token_symbol: str) -> Dict[str, Any]:
+        token_symbol = token_symbol.upper().strip()
+
         return {
             "gateway": "xapi.to",
             "type": "xapi_gateway_task",
@@ -175,6 +201,8 @@ class FallbackXAPIGatewayClient:
                 "/xapi\n"
                 f"查询 {token_symbol} 的最新价格、24h 变化和基础 token metadata。"
             ),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source": "Electric Crab – The Market Guardian",
         }
 
     async def run_task(self, task: Dict[str, Any], dry_run: bool = True) -> Dict[str, Any]:
@@ -253,17 +281,22 @@ class FallbackXAPIGatewayClient:
             title = item.get("title", "Untitled Market")
             market_prob = round(item.get("market_probability", 0) * 100, 2)
             model_prob = round(item.get("model_probability", 0) * 100, 2)
+            predicted_outcome = item.get("predicted_outcome", "UNKNOWN")
+            outcome_confidence = round(item.get("outcome_confidence", 0) * 100, 2)
             deviation = round(item.get("deviation", 0) * 100, 2)
             risk = item.get("risk_level", "UNKNOWN")
             trust = item.get("trust_score", "N/A")
+            prediction_hash = item.get("prediction_hash", "N/A")
 
             lines.append(
                 f"{index}. {title}\n"
+                f"   Prediction: {predicted_outcome} ({outcome_confidence}%)\n"
                 f"   Market Probability: {market_prob}%\n"
                 f"   Electric Crab Probability: {model_prob}%\n"
                 f"   Deviation: {deviation}%\n"
                 f"   Risk: {risk}\n"
-                f"   Trust Score: {trust}"
+                f"   Trust Score: {trust}\n"
+                f"   Prediction Hash: {prediction_hash}"
             )
 
         lines.append("")
@@ -290,6 +323,14 @@ class DemoDataCollector:
             liquidity_score=round(random.uniform(0.20, 1.00), 4),
             volatility=round(random.uniform(0.02, 0.45), 4),
             sentiment_score=round(random.uniform(-1.00, 1.00), 4),
+            data_quality={
+                "market_probability": "simulated",
+                "volume": "simulated",
+                "whale_ratio": "simulated",
+                "liquidity_score": "simulated",
+                "volatility": "simulated",
+                "sentiment_score": "simulated",
+            }
         )
 
     async def fetch_batch(self, events: List[Dict[str, str]]) -> List[MarketEvent]:
@@ -344,6 +385,15 @@ class FeatureEngineer:
 # =========================================================
 
 class ClassicalMLProbabilityModel:
+    """
+    Demo-friendly classical ML model.
+
+    Important:
+    This uses synthetic targets for MVP demonstration.
+    For production, replace _build_synthetic_targets with real historical
+    resolved market labels.
+    """
+
     def __init__(self):
         self.model = RandomForestRegressor(
             n_estimators=120,
@@ -525,7 +575,11 @@ class DeepLearningAgent:
             "probability": round(float(np.clip(probability, 0.01, 0.99)), 4),
             "confidence": 0.80 if enabled else 0.50,
             "signal": "DEEP_LEARNING_ESTIMATE" if enabled else "DEEP_LEARNING_FALLBACK",
-            "explanation": "Neural network estimates probability from market features.",
+            "explanation": (
+                "Neural network estimates probability from market features."
+                if enabled
+                else "Deep learning extension unavailable; using fallback probability."
+            ),
         }
 
 
@@ -622,8 +676,17 @@ class MultiAgentCoordinator:
         if not warning_signals:
             warning_signals = ["NO_MAJOR_WARNING"]
 
+        predicted_outcome = "YES" if ensemble_probability >= 0.5 else "NO"
+        outcome_confidence = (
+            ensemble_probability
+            if predicted_outcome == "YES"
+            else 1.0 - ensemble_probability
+        )
+
         return {
             "ensemble_probability": ensemble_probability,
+            "predicted_outcome": predicted_outcome,
+            "outcome_confidence": round(float(outcome_confidence), 4),
             "agent_votes": votes,
             "agent_disagreement": disagreement,
             "consensus_level": consensus_level,
@@ -730,15 +793,19 @@ class Explainer:
         self,
         event: MarketEvent,
         model_probability: float,
+        predicted_outcome: str,
+        outcome_confidence: float,
         risk_level: str,
         factors: List[str],
     ) -> str:
         market_pct = round(event.market_probability * 100, 2)
         model_pct = round(model_probability * 100, 2)
+        confidence_pct = round(outcome_confidence * 100, 2)
         factor_text = ", ".join(factors[:3])
 
         return (
-            f"Electric Crab flags this market as {risk_level}. "
+            f"Electric Crab predicts {predicted_outcome} with {confidence_pct}% confidence "
+            f"and flags this market as {risk_level}. "
             f"The market implies {market_pct}% while the multi-agent model estimates {model_pct}%. "
             f"Main drivers: {factor_text}."
         )
@@ -747,6 +814,8 @@ class Explainer:
         self,
         event: MarketEvent,
         model_probability: float,
+        predicted_outcome: str,
+        outcome_confidence: float,
         risk_level: str,
         trust_score: float,
     ) -> Dict[str, Any]:
@@ -754,10 +823,10 @@ class Explainer:
 
         if signed_deviation >= 0.10:
             signal = "MARKET_MAY_BE_UNDERPRICED"
-            insight = "The multi-agent model estimates a higher probability than the market."
+            insight = "The multi-agent model estimates a higher YES probability than the market."
         elif signed_deviation <= -0.10:
             signal = "MARKET_MAY_BE_OVERPRICED"
-            insight = "The multi-agent model estimates a lower probability than the market."
+            insight = "The multi-agent model estimates a lower YES probability than the market."
         else:
             signal = "MARKET_FAIRLY_ALIGNED"
             insight = "The market probability and model estimate are broadly aligned."
@@ -770,12 +839,96 @@ class Explainer:
             action_label = "Low concern"
 
         return {
+            "predicted_outcome": predicted_outcome,
+            "outcome_confidence": outcome_confidence,
             "decision_signal": signal,
             "action_label": action_label,
             "insight": insight,
             "trust_score": trust_score,
             "disclaimer": "Showcase only. Not financial advice.",
         }
+
+
+# =========================================================
+# Proof Engine
+# =========================================================
+
+class ProofEngine:
+    """
+    Creates a deterministic prediction hash.
+
+    MVP behavior:
+    - Generates a canonical JSON payload
+    - Hashes it with SHA-256
+    - Marks chain status as LOCAL_HASH_ONLY
+
+    Production extension:
+    - Send prediction_hash to a smart contract
+    - Return tx hash, block number, contract address
+    """
+
+    def build_prediction_proof(
+        self,
+        event: MarketEvent,
+        model_probability: float,
+        predicted_outcome: str,
+        outcome_confidence: float,
+        risk: Dict[str, Any],
+        multi_agent: Dict[str, Any],
+        data_source: str,
+    ) -> PredictionProof:
+        created_at = datetime.now(timezone.utc).isoformat()
+
+        proof_payload = {
+            "project": "Electric Crab – The Market Guardian",
+            "version": "mvp-0.2",
+            "created_at": created_at,
+            "data_source": data_source,
+            "event": {
+                "event_id": event.event_id,
+                "title": event.title,
+                "market_probability": event.market_probability,
+                "volume": event.volume,
+                "whale_ratio": event.whale_ratio,
+                "liquidity_score": event.liquidity_score,
+                "volatility": event.volatility,
+                "sentiment_score": event.sentiment_score,
+                "data_quality": event.data_quality or {},
+            },
+            "prediction": {
+                "model_probability": model_probability,
+                "predicted_outcome": predicted_outcome,
+                "outcome_confidence": outcome_confidence,
+                "deviation": risk["deviation"],
+                "risk_points": risk["risk_points"],
+                "risk_level": risk["risk_level"],
+                "trust_score": risk["trust_score"],
+                "main_factors": risk["main_factors"],
+            },
+            "multi_agent": {
+                "agent_disagreement": multi_agent["agent_disagreement"],
+                "consensus_level": multi_agent["consensus_level"],
+                "warning_signals": multi_agent["warning_signals"],
+            },
+        }
+
+        canonical = json.dumps(
+            proof_payload,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        prediction_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+        return PredictionProof(
+            event_id=event.event_id,
+            prediction_hash=prediction_hash,
+            created_at=created_at,
+            proof_payload=proof_payload,
+            chain_status="LOCAL_HASH_ONLY",
+            chain_tx_hash=None,
+        )
 
 
 # =========================================================
@@ -803,6 +956,7 @@ class ElectricCrabAgent:
         self.coordinator = MultiAgentCoordinator()
         self.risk_engine = RiskEngine()
         self.explainer = Explainer()
+        self.proof_engine = ProofEngine()
         self.xapi_agent = XAPIGatewayAgent()
 
         self.deep_model = None
@@ -864,7 +1018,6 @@ class ElectricCrabAgent:
             return []
 
         X = self.feature_engineer.transform_events(market_events)
-
         classical_probs = self.classical_model.fit_predict(X)
 
         if self.deep_model is not None:
@@ -898,6 +1051,8 @@ class ElectricCrabAgent:
             )
 
             model_probability = multi_agent["ensemble_probability"]
+            predicted_outcome = multi_agent["predicted_outcome"]
+            outcome_confidence = multi_agent["outcome_confidence"]
 
             risk = self.risk_engine.score(
                 event=event,
@@ -909,6 +1064,8 @@ class ElectricCrabAgent:
             tldr = self.explainer.generate_tldr(
                 event=event,
                 model_probability=model_probability,
+                predicted_outcome=predicted_outcome,
+                outcome_confidence=outcome_confidence,
                 risk_level=risk["risk_level"],
                 factors=risk["main_factors"],
             )
@@ -916,8 +1073,20 @@ class ElectricCrabAgent:
             decision = self.explainer.decision_showcase(
                 event=event,
                 model_probability=model_probability,
+                predicted_outcome=predicted_outcome,
+                outcome_confidence=outcome_confidence,
                 risk_level=risk["risk_level"],
                 trust_score=risk["trust_score"],
+            )
+
+            proof = self.proof_engine.build_prediction_proof(
+                event=event,
+                model_probability=model_probability,
+                predicted_outcome=predicted_outcome,
+                outcome_confidence=outcome_confidence,
+                risk=risk,
+                multi_agent=multi_agent,
+                data_source=data_source,
             )
 
             xapi_research_tasks = self.build_xapi_research_tasks_for_event(event)
@@ -947,12 +1116,20 @@ class ElectricCrabAgent:
                 "result": {
                     "market_probability": event.market_probability,
                     "model_probability": model_probability,
+                    "predicted_outcome": predicted_outcome,
+                    "outcome_confidence": outcome_confidence,
                     "deviation": risk["deviation"],
                     "risk_points": risk["risk_points"],
                     "risk_level": risk["risk_level"],
                     "trust_score": risk["trust_score"],
                     "main_factors": risk["main_factors"],
                     "decision_showcase": decision,
+                    "prediction_proof": {
+                        "prediction_hash": proof.prediction_hash,
+                        "created_at": proof.created_at,
+                        "chain_status": proof.chain_status,
+                        "chain_tx_hash": proof.chain_tx_hash,
+                    },
                     "multi_agent": multi_agent,
                     "xapi_gateway_agent": xapi_gateway_signal,
                     "xapi_gateway_tasks": xapi_research_tasks,
@@ -962,6 +1139,7 @@ class ElectricCrabAgent:
                         "reinforcement_learning_enabled": self.rl_optimizer is not None,
                         "gpu_batch_scoring": gpu_status,
                         "deep_learning_status": deep_status,
+                        "data_quality": event.data_quality or {},
                     },
                 },
             }
@@ -972,11 +1150,14 @@ class ElectricCrabAgent:
                     title=event.title,
                     market_probability=event.market_probability,
                     model_probability=model_probability,
+                    predicted_outcome=predicted_outcome,
+                    outcome_confidence=outcome_confidence,
                     deviation=risk["deviation"],
                     risk_level=risk["risk_level"],
                     trust_score=risk["trust_score"],
                     main_factors=risk["main_factors"],
                     tldr=tldr,
+                    proof=proof,
                     xapi=xapi,
                 )
             )
@@ -990,7 +1171,10 @@ class ElectricCrabAgent:
         tasks = [
             self.xapi_gateway.build_market_research_task(
                 market_title=event.title,
-            )
+            ),
+            self.xapi_gateway.build_twitter_signal_task(
+                query=event.title,
+            ),
         ]
 
         title_upper = event.title.upper()
@@ -1024,6 +1208,7 @@ class ElectricCrabAgent:
                 liquidity_score=0,
                 volatility=0,
                 sentiment_score=0,
+                data_quality={},
             )
 
             tasks.extend(self.build_xapi_research_tasks_for_event(event))
@@ -1047,10 +1232,13 @@ class ElectricCrabAgent:
                 "title": result.title,
                 "market_probability": result.market_probability,
                 "model_probability": result.model_probability,
+                "predicted_outcome": result.predicted_outcome,
+                "outcome_confidence": result.outcome_confidence,
                 "deviation": result.deviation,
                 "risk_level": result.risk_level,
                 "trust_score": result.trust_score,
                 "main_factors": result.main_factors,
+                "prediction_hash": result.proof.prediction_hash,
             }
             for result in results
         ]
@@ -1065,6 +1253,64 @@ class ElectricCrabAgent:
             dry_run=dry_run,
         )
 
+    def apply_settlement_feedback(
+        self,
+        result: AuditResult,
+        actual_outcome: str,
+    ) -> Dict[str, Any]:
+        """
+        RL feedback hook.
+
+        actual_outcome:
+        - "YES"
+        - "NO"
+
+        This method updates the RL risk optimizer if available.
+        """
+
+        if self.rl_optimizer is None:
+            return {
+                "updated": False,
+                "reason": "RL optimizer is not available.",
+            }
+
+        actual_outcome = actual_outcome.upper().strip()
+
+        if actual_outcome not in {"YES", "NO"}:
+            return {
+                "updated": False,
+                "reason": "actual_outcome must be YES or NO.",
+            }
+
+        prediction_correct = result.predicted_outcome == actual_outcome
+
+        if prediction_correct:
+            actual_outcome_shift = 0.25
+        else:
+            actual_outcome_shift = 0.35
+
+        factor_values = {
+            "deviation": result.deviation,
+            "whale_ratio": 0.25,
+            "low_liquidity": 0.25,
+            "volatility": 0.25,
+            "sentiment": 0.25,
+        }
+
+        update = self.rl_optimizer.update_policy(
+            predicted_risk_level=result.risk_level,
+            actual_outcome_shift=actual_outcome_shift,
+            factor_values=factor_values,
+        )
+
+        return {
+            "updated": True,
+            "prediction_correct": prediction_correct,
+            "actual_outcome": actual_outcome,
+            "predicted_outcome": result.predicted_outcome,
+            "rl_update": update,
+        }
+
 
 # =========================================================
 # Printing Helpers
@@ -1075,6 +1321,8 @@ def print_results(results: List[AuditResult]):
         print("\n==============================")
         print(result.title)
         print("==============================")
+        print("Prediction:", result.predicted_outcome)
+        print("Outcome Confidence:", result.outcome_confidence)
         print("Market Probability:", result.market_probability)
         print("Multi-Agent Model Probability:", result.model_probability)
         print("Deviation:", result.deviation)
@@ -1082,6 +1330,9 @@ def print_results(results: List[AuditResult]):
         print("Trust Score:", result.trust_score)
         print("Factors:", result.main_factors)
         print("TL;DR:", result.tldr)
+        print("Prediction Hash:", result.proof.prediction_hash)
+        print("Proof Created At:", result.proof.created_at)
+        print("Chain Status:", result.proof.chain_status)
 
         xapi_result = result.xapi["result"]
         decision = xapi_result["decision_showcase"]
@@ -1172,6 +1423,14 @@ async def demo(notify: bool = False, send: bool = False):
         {
             "event_id": "demo-003",
             "title": "Will Team A win the final?",
+        },
+        {
+            "event_id": "demo-004",
+            "title": "Will a major AI regulation bill pass this year?",
+        },
+        {
+            "event_id": "demo-005",
+            "title": "Will ETH outperform BTC this quarter?",
         },
     ]
 

@@ -46,20 +46,19 @@ class RealPolymarketCollector:
     """
     Fetch real public market data from Polymarket Gamma API.
 
-    Output format is a plain dict.
-    electric_crab_core.py will convert the dict into MarketEvent.
-
     MVP fields:
     - event_id
     - title
     - market_probability
     - volume
-    - liquidity_score
     - whale_ratio
+    - liquidity_score
     - volatility
     - sentiment_score
+    - data_quality
 
-    Some fields are estimated placeholders unless additional APIs are connected:
+    Current limitation:
+    Some fields are heuristic or placeholder unless additional APIs are connected:
     - whale_ratio
     - sentiment_score
     - volatility
@@ -80,7 +79,7 @@ class RealPolymarketCollector:
             "closed": "false",
             "active": "true",
             "order": "volume",
-            "ascending": "false"
+            "ascending": "false",
         }
 
         async with httpx.AsyncClient(timeout=25) as client:
@@ -111,10 +110,12 @@ class RealPolymarketCollector:
         )
 
         markets = raw_event.get("markets", [])
+
         if not markets or not isinstance(markets, list):
             return None
 
         market = markets[0]
+
         if not isinstance(market, dict):
             return None
 
@@ -125,7 +126,6 @@ class RealPolymarketCollector:
             or market.get("volumeNum")
             or raw_event.get("volume")
             or raw_event.get("volumeNum")
-            or raw_event.get("liquidity")
             or 0
         )
 
@@ -139,38 +139,30 @@ class RealPolymarketCollector:
 
         liquidity_score = min(liquidity / 100_000, 1.0) if liquidity > 0 else 0.25
 
-        # MVP heuristics.
-        # In a later version, these can be replaced with:
-        # - on-chain wallet concentration
-        # - historical price movement
-        # - social/news sentiment from xapi.to
-        whale_ratio = 0.25
-
-        # Higher uncertainty when price is close to 0.5.
-        volatility = min((1.0 - abs(market_probability - 0.5) * 2.0) * 0.35, 0.5)
-
-        sentiment_score = 0.0
+        whale_ratio = self._estimate_whale_ratio_placeholder()
+        volatility = self._estimate_volatility_from_probability(market_probability)
+        sentiment_score = self._estimate_sentiment_placeholder()
 
         return {
             "event_id": event_id,
             "title": title,
             "market_probability": round(float(np.clip(market_probability, 0.01, 0.99)), 4),
             "volume": round(float(volume), 2),
-            "whale_ratio": round(float(whale_ratio), 4),
+            "whale_ratio": round(float(np.clip(whale_ratio, 0.0, 1.0)), 4),
             "liquidity_score": round(float(np.clip(liquidity_score, 0.0, 1.0)), 4),
             "volatility": round(float(np.clip(volatility, 0.0, 1.0)), 4),
             "sentiment_score": round(float(np.clip(sentiment_score, -1.0, 1.0)), 4),
+            "data_quality": {
+                "market_probability": "real_polymarket_gamma_api",
+                "volume": "real_polymarket_gamma_api",
+                "liquidity_score": "heuristic_from_gamma_liquidity",
+                "whale_ratio": "placeholder_needs_onchain_wallet_data",
+                "volatility": "heuristic_from_probability_uncertainty",
+                "sentiment_score": "placeholder_needs_social_signal_api",
+            },
         }
 
     def _extract_yes_probability(self, market: Dict[str, Any]) -> float:
-        """
-        Polymarket Gamma markets often expose:
-        - outcomes
-        - outcomePrices
-
-        Sometimes these are JSON strings, sometimes lists.
-        """
-
         outcomes = self._decode_json_array(market.get("outcomes"))
         prices = self._decode_json_array(market.get("outcomePrices"))
 
@@ -181,18 +173,27 @@ class RealPolymarketCollector:
 
             return self._safe_probability(prices[0])
 
-        # Fallback fields if API shape changes.
         for key in [
             "lastTradePrice",
             "bestAsk",
             "bestBid",
             "price",
-            "probability"
+            "probability",
         ]:
             if key in market:
                 return self._safe_probability(market.get(key))
 
         return 0.5
+
+    def _estimate_whale_ratio_placeholder(self) -> float:
+        return 0.25
+
+    def _estimate_volatility_from_probability(self, market_probability: float) -> float:
+        uncertainty = 1.0 - abs(market_probability - 0.5) * 2.0
+        return min(max(uncertainty * 0.35, 0.02), 0.50)
+
+    def _estimate_sentiment_placeholder(self) -> float:
+        return 0.0
 
     def _decode_json_array(self, value: Any) -> List[Any]:
         if value is None:
@@ -235,13 +236,16 @@ class DeepLearningProbabilityScorer:
     input features -> hidden layers -> probability
 
     If PyTorch is not available, it falls back to a NumPy scorer.
+
+    Current MVP uses synthetic targets.
+    Production version should train on historical resolved markets.
     """
 
     def __init__(
         self,
         input_dim: int = 6,
         hidden_dim: int = 32,
-        epochs: int = 120
+        epochs: int = 120,
     ):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -258,7 +262,7 @@ class DeepLearningProbabilityScorer:
                 nn.Linear(hidden_dim, hidden_dim // 2),
                 nn.ReLU(),
                 nn.Linear(hidden_dim // 2, 1),
-                nn.Sigmoid()
+                nn.Sigmoid(),
             ).to(self.device)
 
     def fit_predict(self, X: np.ndarray) -> np.ndarray:
@@ -288,24 +292,13 @@ class DeepLearningProbabilityScorer:
         self.is_trained = True
 
         self.model.eval()
+
         with torch.no_grad():
             probs = self.model(X_tensor).detach().cpu().numpy().reshape(-1)
 
         return np.clip(probs, 0.01, 0.99)
 
     def _build_synthetic_targets(self, X: np.ndarray) -> np.ndarray:
-        """
-        Synthetic target for hackathon MVP.
-
-        Feature order:
-        0 market_probability
-        1 volume_score
-        2 whale_ratio
-        3 liquidity_score
-        4 volatility
-        5 sentiment_scaled
-        """
-
         targets = []
 
         for row in X:
@@ -345,7 +338,8 @@ class DeepLearningProbabilityScorer:
             "device": self.device,
             "gpu_enabled": self.device == "cuda",
             "model_type": "PyTorch MLP" if self.enabled else "NumPy fallback",
-            "is_trained": self.is_trained
+            "is_trained": self.is_trained,
+            "training_data": "synthetic_targets_for_mvp_demo",
         }
 
 
@@ -360,7 +354,7 @@ class RLAdaptiveRiskOptimizer:
     This is not a full PPO/DQN implementation.
     It is a demo-friendly online policy update mechanism.
 
-    It adapts feature weights based on reward feedback.
+    It adapts feature weights based on reward feedback after market resolution.
     """
 
     def __init__(self):
@@ -382,7 +376,7 @@ class RLAdaptiveRiskOptimizer:
         liquidity_score: float,
         volatility: float,
         sentiment_score: float,
-        agent_disagreement: float = 0.0
+        agent_disagreement: float = 0.0,
     ) -> float:
         normalized = {
             "deviation": min(deviation / 0.35, 1.0),
@@ -397,7 +391,6 @@ class RLAdaptiveRiskOptimizer:
         for key, value in normalized.items():
             risk_score += self.weights[key] * value
 
-        # Multi-agent disagreement adds uncertainty risk.
         risk_score += min(agent_disagreement / 0.25, 1.0) * 0.10
 
         return round(float(np.clip(risk_score * 100, 0, 100)), 2)
@@ -406,15 +399,8 @@ class RLAdaptiveRiskOptimizer:
         self,
         predicted_risk_level: str,
         actual_outcome_shift: float,
-        factor_values: Dict[str, float]
+        factor_values: Dict[str, float],
     ) -> Dict[str, Any]:
-        """
-        Update weights after observing market movement or resolution.
-
-        actual_outcome_shift:
-        - Larger shift means earlier warning was useful.
-        """
-
         high_shift = actual_outcome_shift >= 0.20
         medium_shift = actual_outcome_shift >= 0.10
 
@@ -446,14 +432,15 @@ class RLAdaptiveRiskOptimizer:
         return {
             "reward": reward,
             "updated_weights": self.weights,
-            "reward_history_size": len(self.reward_history)
+            "reward_history_size": len(self.reward_history),
         }
 
     def status(self) -> Dict[str, Any]:
         return {
             "weights": self.weights,
             "learning_rate": self.learning_rate,
-            "reward_history_size": len(self.reward_history)
+            "reward_history_size": len(self.reward_history),
+            "optimizer_type": "rl_style_online_weight_update",
         }
 
 
@@ -485,7 +472,7 @@ class GPUBatchScorer:
             weights = torch.tensor(
                 [0.42, 0.08, -0.16, 0.18, -0.10, 0.08],
                 dtype=torch.float32,
-                device=self.device
+                device=self.device,
             )
 
             logits = tensor @ weights + 0.15
@@ -504,7 +491,7 @@ class GPUBatchScorer:
             "torch_available": TORCH_AVAILABLE,
             "device": self.device,
             "gpu_enabled": self.device == "cuda",
-            "scorer_type": "Torch vectorized scorer" if self.enabled else "NumPy CPU scorer"
+            "scorer_type": "Torch vectorized scorer" if self.enabled else "NumPy CPU scorer",
         }
 
 
@@ -542,8 +529,7 @@ class XAPIGatewayClient:
     """
     xapi.to gateway client for Electric Crab.
 
-    This client does not require direct HTTP endpoint knowledge.
-    It builds xapi.to Skill / CLI tasks that can be shown in demo or executed.
+    This client builds xapi.to Skill / CLI tasks that can be shown in demo or executed.
 
     Supported tasks:
     - @Mention All audit notification
@@ -563,7 +549,7 @@ class XAPIGatewayClient:
     def build_mention_all_task(
         self,
         project_name: str,
-        audit_results: List[Dict[str, Any]]
+        audit_results: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         summary = self._build_audit_summary(audit_results)
 
@@ -584,12 +570,12 @@ class XAPIGatewayClient:
             "xapi_prompt": xapi_prompt,
             "message": f"@Mention All\n\n{summary}",
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "source": "Electric Crab – The Market Guardian"
+            "source": "Electric Crab – The Market Guardian",
         }
 
     def build_market_research_task(
         self,
-        market_title: str
+        market_title: str,
     ) -> Dict[str, Any]:
         xapi_prompt = (
             "/xapi\n"
@@ -603,12 +589,12 @@ class XAPIGatewayClient:
             "market_title": market_title,
             "xapi_prompt": xapi_prompt,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "source": "Electric Crab – The Market Guardian"
+            "source": "Electric Crab – The Market Guardian",
         }
 
     def build_twitter_signal_task(
         self,
-        query: str
+        query: str,
     ) -> Dict[str, Any]:
         xapi_prompt = (
             "/xapi\n"
@@ -622,12 +608,12 @@ class XAPIGatewayClient:
             "query": query,
             "xapi_prompt": xapi_prompt,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "source": "Electric Crab – The Market Guardian"
+            "source": "Electric Crab – The Market Guardian",
         }
 
     def build_crypto_price_task(
         self,
-        token_symbol: str
+        token_symbol: str,
     ) -> Dict[str, Any]:
         token_symbol = token_symbol.upper().strip()
 
@@ -643,34 +629,20 @@ class XAPIGatewayClient:
             "token_symbol": token_symbol,
             "xapi_prompt": xapi_prompt,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "source": "Electric Crab – The Market Guardian"
+            "source": "Electric Crab – The Market Guardian",
         }
 
     async def run_task(
         self,
         task: Dict[str, Any],
-        dry_run: bool = True
+        dry_run: bool = True,
     ) -> Dict[str, Any]:
-        """
-        Execute or preview xapi.to task.
-
-        Default:
-        - dry_run=True
-        - only prints task preview
-        - safest for hackathon demo
-
-        Real CLI execution:
-        - set XAPI_API_KEY
-        - set XAPI_ENABLE_CLI=true
-        - run: python electric_crab_core.py notify send
-        """
-
         if dry_run:
             return {
                 "executed": False,
                 "dry_run": True,
                 "reason": "Dry run mode. Use argument 'send' to attempt real xapi.to CLI execution.",
-                "task": task
+                "task": task,
             }
 
         if not self.enable_cli:
@@ -678,7 +650,7 @@ class XAPIGatewayClient:
                 "executed": False,
                 "dry_run": False,
                 "reason": "XAPI_ENABLE_CLI is not true. Set $env:XAPI_ENABLE_CLI='true'.",
-                "task": task
+                "task": task,
             }
 
         if not self.api_key:
@@ -686,7 +658,7 @@ class XAPIGatewayClient:
                 "executed": False,
                 "dry_run": False,
                 "reason": "XAPI_API_KEY is missing. Set $env:XAPI_API_KEY='your_key'.",
-                "task": task
+                "task": task,
             }
 
         try:
@@ -697,7 +669,7 @@ class XAPIGatewayClient:
                 "--input",
                 json.dumps(task, ensure_ascii=False),
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
             )
 
             stdout, stderr = await process.communicate()
@@ -708,7 +680,7 @@ class XAPIGatewayClient:
                 "return_code": process.returncode,
                 "stdout": stdout.decode("utf-8", errors="ignore")[:2000],
                 "stderr": stderr.decode("utf-8", errors="ignore")[:2000],
-                "task": task
+                "task": task,
             }
 
         except Exception as exc:
@@ -716,12 +688,12 @@ class XAPIGatewayClient:
                 "executed": False,
                 "dry_run": False,
                 "error": str(exc),
-                "task": task
+                "task": task,
             }
 
     def _build_audit_summary(
         self,
-        audit_results: List[Dict[str, Any]]
+        audit_results: List[Dict[str, Any]],
     ) -> str:
         if not audit_results:
             return "Electric Crab completed an audit, but no market results were generated."
@@ -736,16 +708,19 @@ class XAPIGatewayClient:
             f"Audited markets: {len(audit_results)}",
             f"Risk summary: HIGH={high_count}, MEDIUM={medium_count}, LOW={low_count}",
             "",
-            "Top results:"
+            "Top results:",
         ]
 
         for index, item in enumerate(audit_results[:5], start=1):
             title = item.get("title", "Untitled Market")
             market_prob = round(item.get("market_probability", 0) * 100, 2)
             model_prob = round(item.get("model_probability", 0) * 100, 2)
+            predicted_outcome = item.get("predicted_outcome", "UNKNOWN")
+            outcome_confidence = round(item.get("outcome_confidence", 0) * 100, 2)
             deviation = round(item.get("deviation", 0) * 100, 2)
             risk = item.get("risk_level", "UNKNOWN")
             trust = item.get("trust_score", "N/A")
+            prediction_hash = item.get("prediction_hash", "N/A")
             factors = item.get("main_factors", [])
 
             if isinstance(factors, list):
@@ -755,12 +730,14 @@ class XAPIGatewayClient:
 
             lines.append(
                 f"{index}. {title}\n"
+                f"   Prediction: {predicted_outcome} ({outcome_confidence}%)\n"
                 f"   Market Probability: {market_prob}%\n"
                 f"   Electric Crab Probability: {model_prob}%\n"
                 f"   Deviation: {deviation}%\n"
                 f"   Risk: {risk}\n"
                 f"   Trust Score: {trust}\n"
-                f"   Factors: {factors_text}"
+                f"   Factors: {factors_text}\n"
+                f"   Prediction Hash: {prediction_hash}"
             )
 
         lines.append("")
@@ -793,6 +770,6 @@ def extension_health_check() -> Dict[str, Any]:
             "RLAdaptiveRiskOptimizer",
             "GPUBatchScorer",
             "ParallelBatchRunner",
-            "XAPIGatewayClient"
-        ]
+            "XAPIGatewayClient",
+        ],
     }

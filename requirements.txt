@@ -8,3 +8,4 @@ pydantic
 streamlit 
 pandas
 requests
+web3
